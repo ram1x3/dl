@@ -1,0 +1,148 @@
+pip install seaborn
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from sklearn.metrics import accuracy_score,recall_score,precision_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+LABELS = ["Normal","Fraud"]
+
+dataset = pd.read_csv("creditcard.csv")
+
+dataset
+
+dataset.isnull().values.any()
+
+dataset['Class'].unique()
+
+pd.value_counts(dataset['Class'],sort=True)
+
+count_class = pd.value_counts(dataset['Class'],sort=True)
+count_class.plot(kind="bar")
+plt.xticks(range(len(dataset["Class"].unique())),dataset["Class"].unique())
+plt.title("Frequency by observation number")
+plt.xlabel("class")
+plt.ylabel("Number of observations")
+
+normal_dataset = dataset[dataset.Class==0]
+fraud_dataset = dataset[dataset.Class==1]
+
+
+bins = np.linspace(200,2500,100)
+plt.hist(normal_dataset.Amount, bins=bins, alpha=1,density=True,label="Normal")
+plt.hist(fraud_dataset.Amount, bins=bins, alpha=0.5,density=True,label="Fraud")
+plt.legend(loc="upper right")
+plt.title("Transaction amounts vs percentage of transactions")
+plt.xlabel("Transaction amount")
+plt.ylabel("Percentage of transaction")
+plt.show()
+
+sc = StandardScaler()
+dataset['Time'] = sc.fit_transform(dataset['Time'].values.reshape(-1,1))
+dataset['Amount'] = sc.fit_transform(dataset['Amount'].values.reshape(-1,1))
+
+raw_data = dataset.values
+labels = raw_data[:,-1]
+data = raw_data[:,0:-1]
+train_data,test_data,train_label,test_label = train_test_split(data,labels,random_state=2021,test_size=0.2)
+
+min_val = tf.reduce_min(train_data)
+max_val = tf.reduce_max(train_data)
+train_data = (train_data-min_val)/(max_val-min_val)
+test_data = (test_data-min_val)/(max_val-min_val)
+train_data = tf.cast(train_data,tf.float32)
+test_data = tf.cast(test_data,tf.float32)
+
+train_label = train_label.astype(bool)
+test_label = test_label.astype(bool)
+
+normal_train_data = train_data[~train_label]
+normal_test_data = test_data[~test_label]
+fraud_train_data = train_data[train_label]
+fraud_test_data = test_data[test_label]
+
+nb_epoch = 50
+batch_size=64
+input_dim = normal_train_data.shape[1]
+encoding_dim = 14
+hidden_dim1 = int(encoding_dim/2)
+hidden_dim2 = 4
+learning_rate = 1e-7
+
+input_layers = tf.keras.layers.Input(shape=(input_dim,))
+
+encoder = tf.keras.layers.Dense(encoding_dim,activation="tanh",activity_regularizer=tf.keras.regularizers.l2(learning_rate))(input_layers)
+encoder = tf.keras.layers.Dropout(0.2)(encoder)
+encoder = tf.keras.layers.Dense(hidden_dim1,activation="relu")(encoder)
+encoder = tf.keras.layers.Dense(hidden_dim2,activation=tf.nn.leaky_relu)(encoder)
+
+decoder = tf.keras.layers.Dense(hidden_dim1,activation='relu')(encoder)
+decoder = tf.keras.layers.Dropout(0.2)(decoder)
+decoder = tf.keras.layers.Dense(hidden_dim2,activation='relu')(decoder)
+decoder = tf.keras.layers.Dense(input_dim,activation="tanh")(decoder)
+
+autoencoder = tf.keras.Model(inputs=input_layers,outputs= decoder)
+
+
+cp = tf.keras.callbacks.ModelCheckpoint(filepath="autoencoder_fraud.h5",mode='min',monitor='val_loss',verbose=2,save_best_only=True)
+
+earlystop = tf.keras.callbacks.EarlyStopping(
+ monitor='val_loss',
+                min_delta=0.0001,
+                patience=10,
+                verbose=11,
+                mode='min',
+                restore_best_weights=True)
+
+autoencoder.compile(metrics=['accuracy'],loss= 'mean_squared_error',optimizer='adam')
+
+history = autoencoder.fit(normal_train_data,normal_train_data,epochs=nb_epoch,batch_size=batch_size,shuffle=True,
+                         validation_data=(test_data,test_data),verbose=1,callbacks=[cp,earlystop]).history
+                         
+
+plt.plot(history["loss"],label="train")
+plt.plot(history["val_loss"],label="test")
+plt.legend("upper right")
+plt.title("model loss")
+plt.xlabel("epochs")
+plt.ylabel("Loss")
+plt.show()
+
+test_x_predictions = autoencoder.predict(test_data)
+mse = np.mean(np.power(test_data-test_x_predictions,2),axis=1)
+error_df = pd.DataFrame({"Reconstruction_error":mse,
+                        "True_class":test_label})
+
+threshold_fixed = 50
+groups = error_df.groupby("True_class")
+fig,ax = plt.subplots()
+for name,group in groups:
+    ax.plot(group.index,group.Reconstruction_error,marker='o',ms=3.5,label='fraud' if name==1 else "Normal")
+ax.hlines(threshold_fixed,ax.get_xlim()[0],ax.get_xlim()[1],colors='r',label="Threshold")
+ax.legend()
+plt.title("Reconstruction error for normal and fraud data")
+plt.xlabel("Data point")
+plt.ylabel("Reconstruction error")
+plt.show()
+
+threshold_fixed=52
+pred_y = [1 if e > threshold_fixed else 0
+        for e in error_df.Reconstruction_error.values]
+error_df['pred'] = pred_y
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+conf_matrix = confusion_matrix(error_df.True_class,pred_y)
+
+plt.figure(figsize = (4,4))
+sns.heatmap(conf_matrix,xticklabels = LABELS,yticklabels = LABELS,annot = True,fmt="d")
+plt.title("Confusion matrix")
+plt.ylabel("True class")
+plt.xlabel("Predicted class")
+plt.show()
+
+print("Accuracy :",accuracy_score(error_df['True_class'],error_df['pred']))
+print("Recall :",recall_score(error_df['True_class'],error_df['pred']))
+print("Precision :",precision_score(error_df['True_class'],error_df['pred']))
